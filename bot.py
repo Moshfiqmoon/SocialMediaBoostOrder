@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))  # Replace with your Telegram user ID
+INITIAL_ADMIN_ID = int(os.getenv("ADMIN_ID", 0))  # Initial admin ID from .env
 
 # Initialize SQLite database
 DB_PATH = "submissions.db"
@@ -45,28 +45,26 @@ def init_db():
             status TEXT DEFAULT 'pending'
         )
     ''')
-    # Table for platforms
+    # Table for platforms (empty by default)
     c.execute('''
         CREATE TABLE IF NOT EXISTS platforms (
             name TEXT PRIMARY_KEY,
             active INTEGER DEFAULT 1
         )
     ''')
+    # Table for admins
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY_KEY,
+            added_by INTEGER,
+            added_date TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Add initial admin if not exists
+    c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (INITIAL_ADMIN_ID,))
     conn.commit()
     conn.close()
-    # Initialize platforms if not already present
-    initial_platforms = {
-        "instagram": True, "facebook": True, "linkedin": True, "x": True,
-        "snapchat": True, "youtube": True, "tiktok": True, "twitter": True,
-        "pinterest": True, "reddit": True, "tumblr": True, "wechat": True,
-        "whatsapp": True, "telegram": True
-    }
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    for platform, active in initial_platforms.items():
-        c.execute("INSERT OR IGNORE INTO platforms (name, active) VALUES (?, ?)", (platform, 1 if active else 0))
-    conn.commit()
-    conn.close()
+    # Note: Removed initial platforms - they will be added via /add_platform
 
 init_db()
 
@@ -78,7 +76,7 @@ pricing = {
 }
 
 # Load platforms from database
-def load_platforms():
+def load_platforms():  # Fixed from "diariesdef"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT name, active FROM platforms")
@@ -86,7 +84,25 @@ def load_platforms():
     conn.close()
     return platforms
 
-# Define VALID_PLATFORMS globally after initial load
+# Check if user is admin
+def is_admin(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM admins WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+# Get all admins
+def get_all_admins():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM admins")
+    admins = [row[0] for row in c.fetchall()]
+    conn.close()
+    return admins
+
+# Define VALID_PLATFORMS globally after initial load (will be empty initially)
 VALID_PLATFORMS = load_platforms()
 
 # Help command with inline buttons
@@ -123,11 +139,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Start command with inline platform selection (4 buttons per row)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Determine user_id and chat_id based on whether this is a message or callback query
-    if update.message:  # Called via /start command
+    if update.message:
         user_id = update.message.from_user.id
         chat_id = update.message.chat_id
-    elif update.callback_query:  # Called via button click
+    elif update.callback_query:
         user_id = update.callback_query.from_user.id
         chat_id = update.callback_query.message.chat_id
     else:
@@ -140,19 +155,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     
-    # Fully refresh VALID_PLATFORMS
     global VALID_PLATFORMS
-    VALID_PLATFORMS = load_platforms()  # Reassign instead of update
+    VALID_PLATFORMS = load_platforms()
     
     active_platforms = [p.capitalize() for p, active in VALID_PLATFORMS.items() if active]
+    
+    if not active_platforms:  # If no platforms exist
+        message = (
+            "👋 *Welcome to SocPeak Boost Bot!*\n"
+            "I’ll help you boost your social media presence.\n\n"
+            "⚠️ *No platforms available yet!* Please contact an admin to add platforms."
+        )
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
+        return
+
     keyboard = []
     row = []
     for platform in active_platforms:
         row.append(InlineKeyboardButton(platform, callback_data=f"platform_{platform.lower()}"))
-        if len(row) == 4:  # 4 buttons per row
+        if len(row) == 4:
             keyboard.append(row)
             row = []
-    if row:  # Add any remaining buttons
+    if row:
         keyboard.append(row)
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -162,7 +186,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I’ll help you boost your social media presence. Let’s get started.\n\n"
         "📝 *Step 1:* Please select your platform below:"
     )
-    # Send the message to the appropriate chat
     await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 # Handle text input (platform, link)
@@ -176,7 +199,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute("SELECT platform, account_id FROM submissions WHERE user_id = ?", (user_id,))
         result = c.fetchone()
 
-        if result and result[0] and not result[1]:  # Platform exists, expecting account_id/link
+        if result and result[0] and not result[1]:
             c.execute("UPDATE submissions SET account_id = ? WHERE user_id = ?", (text, user_id))
             conn.commit()
             conn.close()
@@ -211,7 +234,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT platform, account_id, package, photo_path, payment_screenshot_path FROM submissions WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     
-    if not result or result[1] is None:  # No platform or account_id
+    if not result or result[1] is None:
         await update.message.reply_text(
             "⚠️ *Please complete the previous steps first!* Use `/start` to begin.",
             parse_mode=ParseMode.MARKDOWN
@@ -221,7 +244,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     photo_file = await update.message.photo[-1].get_file()
     
-    if result[2] is None:  # No package selected yet, this is the account screenshot
+    if result[2] is None:
         photo_path = os.path.join(IMAGES_DIR, f"{user_id}_account.jpg")
         await photo_file.download_to_drive(photo_path)
         
@@ -240,7 +263,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
-    elif result[2] and result[4] is None:  # Package selected, expecting payment screenshot
+    elif result[2] and result[4] is None:
         payment_screenshot_path = os.path.join(IMAGES_DIR, f"{user_id}_payment.jpg")
         await photo_file.download_to_drive(payment_screenshot_path)
         
@@ -269,17 +292,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- Package: *{package} SocPeak*\n"
             f"Please review the payment screenshot:"
         )
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=admin_message,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        async with aiofiles.open(payment_screenshot_path, 'rb') as payment_photo:
-            await context.bot.send_photo(
-                chat_id=ADMIN_ID,
-                photo=await payment_photo.read(),
-                reply_markup=admin_reply_markup
+        # Notify all admins
+        for admin_id in get_all_admins():
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_message,
+                parse_mode=ParseMode.MARKDOWN
             )
+            async with aiofiles.open(payment_screenshot_path, 'rb') as payment_photo:
+                await context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=await payment_photo.read(),
+                    reply_markup=admin_reply_markup
+                )
     else:
         keyboard = [
             [InlineKeyboardButton("🔄 Start Over", callback_data="start_order")]
@@ -397,7 +422,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer()
 
-    elif data.startswith("approve_") and user_id == ADMIN_ID:
+    elif data.startswith("approve_") and is_admin(user_id):
         target_user_id = int(data.split("_")[1])
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -429,7 +454,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer()
 
-    elif data.startswith("reject_") and user_id == ADMIN_ID:
+    elif data.startswith("reject_") and is_admin(user_id):
         target_user_id = int(data.split("_")[1])
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -457,7 +482,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer()
 
-    elif data.startswith("admin_") and user_id == ADMIN_ID:
+    elif data.startswith("admin_") and is_admin(user_id):
         if data == "admin_add":
             await query.message.reply_text("➕ *Add a new price:* Send `/add_price <SocPeak> <CHF>`", parse_mode=ParseMode.MARKDOWN)
         elif data == "admin_edit":
@@ -520,12 +545,22 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🗑️ *Delete a platform:* Send `/delete_platform <platform_name>`",
                 parse_mode=ParseMode.MARKDOWN
             )
+        elif data == "admin_add_admin":
+            await query.message.reply_text(
+                "➕ *Add a new admin:* Send `/add_admin <user_id>`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        elif data == "admin_remove_admin":
+            await query.message.reply_text(
+                "🗑️ *Remove an admin:* Send `/remove_admin <user_id>`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         await query.answer()
 
 # Admin panel command with inline buttons
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
+    if not is_admin(user_id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -538,7 +573,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🔗 Change Payment Link", callback_data="admin_change_payment_link")],
         [InlineKeyboardButton("➕ Add Platform", callback_data="admin_add_platform"),
          InlineKeyboardButton("✏️ Edit Platform", callback_data="admin_edit_platform"),
-         InlineKeyboardButton("🗑️ Delete Platform", callback_data="admin_delete_platform")]
+         InlineKeyboardButton("🗑️ Delete Platform", callback_data="admin_delete_platform")],
+        [InlineKeyboardButton("➕ Add Admin", callback_data="admin_add_admin"),
+         InlineKeyboardButton("🗑️ Remove Admin", callback_data="admin_remove_admin")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -549,7 +586,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Admin commands (text-based, but triggered via inline buttons)
 async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -560,7 +597,7 @@ async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Added:* {args[0]} SocPeak = {args[1]} CHF", parse_mode=ParseMode.MARKDOWN)
 
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -571,7 +608,7 @@ async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Updated:* {args[0]} SocPeak = {args[1]} CHF", parse_mode=ParseMode.MARKDOWN)
 
 async def delete_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -582,7 +619,7 @@ async def delete_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *Deleted:* {args[0]} SocPeak package", parse_mode=ParseMode.MARKDOWN)
 
 async def update_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -592,10 +629,10 @@ async def update_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ *QR code updated:* {args[0]}", parse_mode=ParseMode.MARKDOWN)
 
 async def toggle_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
-    global VALID_PLATFORMS  # Declare global at the beginning
+    global VALID_PLATFORMS
     args = context.args
     if len(args) != 2 or args[0].lower() not in VALID_PLATFORMS or args[1].lower() not in ["on", "off"]:
         await update.message.reply_text("⚠️ *Usage:* `/toggle_platform <platform> <on|off>`", parse_mode=ParseMode.MARKDOWN)
@@ -607,11 +644,11 @@ async def toggle_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("UPDATE platforms SET active = ? WHERE name = ?", (1 if status else 0, platform))
     conn.commit()
     conn.close()
-    VALID_PLATFORMS = load_platforms()  # Fully refresh
+    VALID_PLATFORMS = load_platforms()
     await update.message.reply_text(f"✅ *Platform {platform.capitalize()} {'activated' if status else 'deactivated'}!*", parse_mode=ParseMode.MARKDOWN)
 
 async def change_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -623,9 +660,8 @@ async def change_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     pricing[package]["link"] = new_link
     await update.message.reply_text(f"✅ *Updated payment link for {package} SocPeak:* {new_link}", parse_mode=ParseMode.MARKDOWN)
 
-# New admin commands for managing platforms
 async def add_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -639,11 +675,11 @@ async def add_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     global VALID_PLATFORMS
-    VALID_PLATFORMS = load_platforms()  # Fully refresh
+    VALID_PLATFORMS = load_platforms()
     await update.message.reply_text(f"✅ *Added platform:* {platform.capitalize()}", parse_mode=ParseMode.MARKDOWN)
 
 async def edit_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -658,16 +694,15 @@ async def edit_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ *Platform {old_name.capitalize()} not found!*", parse_mode=ParseMode.MARKDOWN)
     else:
         conn.commit()
-        # Update submissions with the old platform name
         c.execute("UPDATE submissions SET platform = ? WHERE platform = ?", (new_name.capitalize(), old_name.capitalize()))
         conn.commit()
         global VALID_PLATFORMS
-        VALID_PLATFORMS = load_platforms()  # Fully refresh
+        VALID_PLATFORMS = load_platforms()
         await update.message.reply_text(f"✅ *Edited platform:* {old_name.capitalize()} → {new_name.capitalize()}", parse_mode=ParseMode.MARKDOWN)
     conn.close()
 
 async def delete_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
+    if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
@@ -682,12 +717,51 @@ async def delete_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ *Platform {platform.capitalize()} not found!*", parse_mode=ParseMode.MARKDOWN)
     else:
         conn.commit()
-        # Cancel submissions using this platform
         c.execute("DELETE FROM submissions WHERE platform = ?", (platform.capitalize(),))
         conn.commit()
         global VALID_PLATFORMS
-        VALID_PLATFORMS = load_platforms()  # Fully refresh
+        VALID_PLATFORMS = load_platforms()
         await update.message.reply_text(f"✅ *Deleted platform:* {platform.capitalize()}", parse_mode=ParseMode.MARKDOWN)
+    conn.close()
+
+# New admin management commands
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.message.from_user.id):
+        await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    args = context.args
+    if len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text("⚠️ *Usage:* `/add_admin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    new_admin_id = int(args[0])
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO admins (user_id, added_by) VALUES (?, ?)", 
+              (new_admin_id, update.message.from_user.id))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ *Added new admin:* User ID {new_admin_id}", parse_mode=ParseMode.MARKDOWN)
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.message.from_user.id):
+        await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    args = context.args
+    if len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text("⚠️ *Usage:* `/remove_admin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    admin_to_remove = int(args[0])
+    if admin_to_remove == INITIAL_ADMIN_ID:
+        await update.message.reply_text("⚠️ *Cannot remove the initial admin!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM admins WHERE user_id = ?", (admin_to_remove,))
+    if c.rowcount == 0:
+        await update.message.reply_text(f"⚠️ *User ID {admin_to_remove} is not an admin!*", parse_mode=ParseMode.MARKDOWN)
+    else:
+        conn.commit()
+        await update.message.reply_text(f"✅ *Removed admin:* User ID {admin_to_remove}", parse_mode=ParseMode.MARKDOWN)
     conn.close()
 
 # Error handler
@@ -724,6 +798,8 @@ def main():
     application.add_handler(CommandHandler("add_platform", add_platform))
     application.add_handler(CommandHandler("edit_platform", edit_platform))
     application.add_handler(CommandHandler("delete_platform", delete_platform))
+    application.add_handler(CommandHandler("add_admin", add_admin))
+    application.add_handler(CommandHandler("remove_admin", remove_admin))
 
     # Add error handler
     application.add_error_handler(error_handler)
