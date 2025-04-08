@@ -253,7 +253,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         keyboard = [
-            [InlineKeyboardButton(f"{k} SocPeak - {v['price']} CHF", callback_data=f"package_{k}") for k, v in pricing.items()],
+            [InlineKeyboardButton(f"{k} SocPeak - {v['price']} USD", callback_data=f"package_{k}") for k, v in pricing.items()],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_order")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -407,7 +407,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎉 *Order Summary*\n"
                 f"- Platform: *{platform}*\n"
                 f"- Package: *{package} SocPeak*\n"
-                f"- Price: *{price} CHF*\n\n"
+                f"- Price: *{price} USD*\n\n"
                 f"💳 *Complete your payment here:*\n{payment_link}\n\n"
                 f"📸 *After payment, upload a screenshot of the payment confirmation using the button below:*",
                 reply_markup=reply_markup,
@@ -484,9 +484,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("admin_") and is_admin(user_id):
         if data == "admin_add":
-            await query.message.reply_text("➕ *Add a new price:* Send `/add_price <SocPeak> <CHF>`", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text("➕ *Add a new price:* Send `/add_price <SocPeak> <USD>`", parse_mode=ParseMode.MARKDOWN)
         elif data == "admin_edit":
-            await query.message.reply_text("✏️ *Edit a price:* Send `/edit_price <existing SocPeak> <new CHF>`", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text("✏️ *Edit a price:* Send `/edit_price <existing SocPeak> <new USD>`", parse_mode=ParseMode.MARKDOWN)
         elif data == "admin_delete":
             await query.message.reply_text("🗑️ *Delete a price:* Send `/delete_price <SocPeak>`", parse_mode=ParseMode.MARKDOWN)
         elif data == "admin_qr":
@@ -591,10 +591,10 @@ async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if len(args) != 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("⚠️ *Usage:* `/add_price <SocPeak> <CHF>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("⚠️ *Usage:* `/add_price <SocPeak> <USD>`", parse_mode=ParseMode.MARKDOWN)
         return
     pricing[args[0]] = {"price": int(args[1]), "link": ""}
-    await update.message.reply_text(f"✅ *Added:* {args[0]} SocPeak = {args[1]} CHF", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *Added:* {args[0]} SocPeak = {args[1]} USD", parse_mode=ParseMode.MARKDOWN)
 
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -602,10 +602,10 @@ async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if len(args) != 2 or args[0] not in pricing or not args[1].isdigit():
-        await update.message.reply_text("⚠️ *Usage:* `/edit_price <existing SocPeak> <new CHF>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("⚠️ *Usage:* `/edit_price <existing SocPeak> <new USD>`", parse_mode=ParseMode.MARKDOWN)
         return
     pricing[args[0]]["price"] = int(args[1])
-    await update.message.reply_text(f"✅ *Updated:* {args[0]} SocPeak = {args[1]} CHF", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *Updated:* {args[0]} SocPeak = {args[1]} USD", parse_mode=ParseMode.MARKDOWN)
 
 async def delete_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
