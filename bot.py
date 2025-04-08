@@ -33,7 +33,7 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Table for submissions
+    # Table for submissions (added payment_notified column)
     c.execute('''
         CREATE TABLE IF NOT EXISTS submissions (
             user_id INTEGER PRIMARY_KEY,
@@ -42,7 +42,8 @@ def init_db():
             package TEXT,
             photo_path TEXT,
             payment_screenshot_path TEXT,
-            status TEXT DEFAULT 'pending'
+            status TEXT DEFAULT 'pending',
+            payment_notified INTEGER DEFAULT 0
         )
     ''')
     # Table for platforms (empty by default)
@@ -64,7 +65,6 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (INITIAL_ADMIN_ID,))
     conn.commit()
     conn.close()
-    # Note: Removed initial platforms - they will be added via /add_platform
 
 init_db()
 
@@ -76,7 +76,7 @@ pricing = {
 }
 
 # Load platforms from database
-def load_platforms():  # Fixed from "diariesdef"
+def load_platforms():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT name, active FROM platforms")
@@ -137,7 +137,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# Start command with inline platform selection (4 buttons per row)
+# Start command with inline platform selection (2 buttons per row)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         user_id = update.message.from_user.id
@@ -158,33 +158,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global VALID_PLATFORMS
     VALID_PLATFORMS = load_platforms()
     
-    active_platforms = [p.capitalize() for p, active in VALID_PLATFORMS.items() if active]
+    active_platforms = [p for p, active in VALID_PLATFORMS.items() if active]
     
     if not active_platforms:  # If no platforms exist
         message = (
-            "👋 *Welcome to SocPeak Boost Bot!*\n"
-            "I’ll help you boost your social media presence.\n\n"
-            "⚠️ *No platforms available yet!* Please contact an admin to add platforms."
+            "🌟 *Welcome to SocPeak Boost Bot!* 🌟\n"
+            "I’m here to boost your social media presence!\n\n"
+            "⚠️ *No platforms available yet!* \n"
+            "Please contact an admin to add platforms."
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
         return
 
     keyboard = []
-    row = []
-    for platform in active_platforms:
-        row.append(InlineKeyboardButton(platform, callback_data=f"platform_{platform.lower()}"))
-        if len(row) == 4:
-            keyboard.append(row)
-            row = []
-    if row:
+    for i in range(0, len(active_platforms), 2):
+        row = [
+            InlineKeyboardButton(active_platforms[i], callback_data=f"platform_{active_platforms[i].lower().replace(' ', '_')}"),
+        ]
+        if i + 1 < len(active_platforms):
+            row.append(InlineKeyboardButton(active_platforms[i + 1], callback_data=f"platform_{active_platforms[i + 1].lower().replace(' ', '_')}"))
         keyboard.append(row)
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     message = (
-        "👋 *Welcome to SocPeak Boost Bot!*\n"
-        "I’ll help you boost your social media presence. Let’s get started.\n\n"
-        "📝 *Step 1:* Please select your platform below:"
+        "🌟 *Welcome to SocPeak Boost Bot!* 🌟\n"
+        "I’m here to boost your social media presence!\n\n"
+        "📌 *Step 1: Select Your Platform*\n"
+        "Choose from the options below:"
     )
     await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
@@ -231,7 +232,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT platform, account_id, package, photo_path, payment_screenshot_path FROM submissions WHERE user_id = ?", (user_id,))
+    c.execute("SELECT platform, account_id, package, photo_path, payment_screenshot_path, payment_notified FROM submissions WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     
     if not result or result[1] is None:
@@ -244,7 +245,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     photo_file = await update.message.photo[-1].get_file()
     
-    if result[2] is None:
+    if result[2] is None:  # Account screenshot
         photo_path = os.path.join(IMAGES_DIR, f"{user_id}_account.jpg")
         await photo_file.download_to_drive(photo_path)
         
@@ -263,11 +264,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
-    elif result[2] and result[4] is None:
+    elif result[2] and result[4] is None and result[5] == 0:  # Payment screenshot, not yet notified
         payment_screenshot_path = os.path.join(IMAGES_DIR, f"{user_id}_payment.jpg")
         await photo_file.download_to_drive(payment_screenshot_path)
         
-        c.execute("UPDATE submissions SET payment_screenshot_path = ? WHERE user_id = ?", (payment_screenshot_path, user_id))
+        c.execute("UPDATE submissions SET payment_screenshot_path = ?, payment_notified = 1 WHERE user_id = ?", (payment_screenshot_path, user_id))
         conn.commit()
         
         platform, account_id, package = result[0], result[1], result[2]
@@ -306,16 +307,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=admin_reply_markup
                 )
     else:
+        conn.close()
         keyboard = [
             [InlineKeyboardButton("🔄 Start Over", callback_data="start_order")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "ℹ️ *Order already submitted!* Please wait for admin approval or start over:",
+            "ℹ️ *Order already submitted or under review!* Please wait for admin approval or start over:",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
-        conn.close()
 
 # Handle inline button clicks (user and admin)
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -353,7 +354,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
 
     elif data.startswith("platform_"):
-        platform = data.split("_")[1].capitalize()
+        platform = data.replace("platform_", "").replace("_", " ")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT INTO submissions (user_id, platform) VALUES (?, ?)", (user_id, platform))
@@ -532,7 +533,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif data == "admin_add_platform":
             await query.message.reply_text(
-                "➕ *Add a new platform:* Send `/add_platform <platform_name>`",
+                "➕ *Add a new platform:* Send `/add_platform <platform_name>` (e.g., 'Facebook Followers')",
                 parse_mode=ParseMode.MARKDOWN
             )
         elif data == "admin_edit_platform":
@@ -634,18 +635,18 @@ async def toggle_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global VALID_PLATFORMS
     args = context.args
-    if len(args) != 2 or args[0].lower() not in VALID_PLATFORMS or args[1].lower() not in ["on", "off"]:
-        await update.message.reply_text("⚠️ *Usage:* `/toggle_platform <platform> <on|off>`", parse_mode=ParseMode.MARKDOWN)
+    if len(args) < 2 or args[-1].lower() not in ["on", "off"]:
+        await update.message.reply_text("⚠️ *Usage:* `/toggle_platform <platform_name> <on|off>`", parse_mode=ParseMode.MARKDOWN)
         return
-    platform = args[0].lower()
-    status = args[1].lower() == "on"
+    platform = " ".join(args[:-1])
+    status = args[-1].lower() == "on"
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE platforms SET active = ? WHERE name = ?", (1 if status else 0, platform))
     conn.commit()
     conn.close()
     VALID_PLATFORMS = load_platforms()
-    await update.message.reply_text(f"✅ *Platform {platform.capitalize()} {'activated' if status else 'deactivated'}!*", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *Platform {platform} {'activated' if status else 'deactivated'}!*", parse_mode=ParseMode.MARKDOWN)
 
 async def change_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -665,10 +666,10 @@ async def add_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
-    if len(args) != 1:
-        await update.message.reply_text("⚠️ *Usage:* `/add_platform <platform_name>`", parse_mode=ParseMode.MARKDOWN)
+    if not args or len(args) > 3:
+        await update.message.reply_text("⚠️ *Usage:* `/add_platform <platform_name>` (1-3 words, e.g., 'Facebook Followers')", parse_mode=ParseMode.MARKDOWN)
         return
-    platform = args[0].lower()
+    platform = " ".join(args)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO platforms (name, active) VALUES (?, 1)", (platform,))
@@ -676,29 +677,30 @@ async def add_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     global VALID_PLATFORMS
     VALID_PLATFORMS = load_platforms()
-    await update.message.reply_text(f"✅ *Added platform:* {platform.capitalize()}", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ *Added platform:* {platform}", parse_mode=ParseMode.MARKDOWN)
 
 async def edit_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
-    if len(args) != 2:
+    if len(args) < 2:
         await update.message.reply_text("⚠️ *Usage:* `/edit_platform <old_name> <new_name>`", parse_mode=ParseMode.MARKDOWN)
         return
-    old_name, new_name = args[0].lower(), args[1].lower()
+    old_name = " ".join(args[:-1])
+    new_name = args[-1]
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE platforms SET name = ? WHERE name = ?", (new_name, old_name))
     if c.rowcount == 0:
-        await update.message.reply_text(f"⚠️ *Platform {old_name.capitalize()} not found!*", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ *Platform {old_name} not found!*", parse_mode=ParseMode.MARKDOWN)
     else:
         conn.commit()
-        c.execute("UPDATE submissions SET platform = ? WHERE platform = ?", (new_name.capitalize(), old_name.capitalize()))
+        c.execute("UPDATE submissions SET platform = ? WHERE platform = ?", (new_name, old_name))
         conn.commit()
         global VALID_PLATFORMS
         VALID_PLATFORMS = load_platforms()
-        await update.message.reply_text(f"✅ *Edited platform:* {old_name.capitalize()} → {new_name.capitalize()}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ *Edited platform:* {old_name} → {new_name}", parse_mode=ParseMode.MARKDOWN)
     conn.close()
 
 async def delete_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -706,22 +708,22 @@ async def delete_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
-    if len(args) != 1:
+    if not args:
         await update.message.reply_text("⚠️ *Usage:* `/delete_platform <platform_name>`", parse_mode=ParseMode.MARKDOWN)
         return
-    platform = args[0].lower()
+    platform = " ".join(args)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM platforms WHERE name = ?", (platform,))
     if c.rowcount == 0:
-        await update.message.reply_text(f"⚠️ *Platform {platform.capitalize()} not found!*", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ *Platform {platform} not found!*", parse_mode=ParseMode.MARKDOWN)
     else:
         conn.commit()
-        c.execute("DELETE FROM submissions WHERE platform = ?", (platform.capitalize(),))
+        c.execute("DELETE FROM submissions WHERE platform = ?", (platform,))
         conn.commit()
         global VALID_PLATFORMS
         VALID_PLATFORMS = load_platforms()
-        await update.message.reply_text(f"✅ *Deleted platform:* {platform.capitalize()}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ *Deleted platform:* {platform}", parse_mode=ParseMode.MARKDOWN)
     conn.close()
 
 # New admin management commands
