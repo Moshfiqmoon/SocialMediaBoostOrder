@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,48 +32,57 @@ IMAGES_DIR = "user_images"
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    # Table for submissions (added payment_notified column)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS submissions (
-            user_id INTEGER PRIMARY_KEY,
-            platform TEXT,
-            account_id TEXT,
-            package TEXT,
-            photo_path TEXT,
-            payment_screenshot_path TEXT,
-            status TEXT DEFAULT 'pending',
-            payment_notified INTEGER DEFAULT 0
-        )
-    ''')
-    # Table for platforms (empty by default)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS platforms (
-            name TEXT PRIMARY_KEY,
-            active INTEGER DEFAULT 1
-        )
-    ''')
-    # Table for admins
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY_KEY,
-            added_by INTEGER,
-            added_date TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    # Add initial admin if not exists
-    c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (INITIAL_ADMIN_ID,))
-    conn.commit()
-    conn.close()
+    try:
+        logger.info(f"Initializing database at {DB_PATH}")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        # Table for submissions
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS submissions (
+                user_id INTEGER PRIMARY_KEY,
+                platform TEXT,
+                account_id TEXT,
+                package TEXT,
+                photo_path TEXT,
+                payment_screenshot_path TEXT,
+                status TEXT DEFAULT 'pending',
+                payment_notified INTEGER DEFAULT 0
+            )
+        ''')
+        # Table for platforms
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS platforms (
+                name TEXT PRIMARY_KEY,
+                active INTEGER DEFAULT 1
+            )
+        ''')
+        # Table for admins
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY_KEY,
+                added_by INTEGER,
+                added_date TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # Add initial admin if not exists
+        c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (INITIAL_ADMIN_ID,))
+        conn.commit()
+        logger.info("Database initialized successfully")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise  # Re-raise to ensure the bot doesn't start without a database
+    finally:
+        conn.close()
 
+# Run init_db() at startup
 init_db()
 
-# Pricing
+# Pricing (Initial values)
 pricing = {
-    "1000": {"price": 49, "link": "https://www.paypal.com/ncp/payment/8SNLJLF5Z9B6Q"},
-    "3000": {"price": 99, "link": "https://www.paypal.com/ncp/payment/QXUFNSAR8ZAV2"},
-    "5000": {"price": 149, "link": "https://www.paypal.com/ncp/payment/Q8S4B5GT93JW2"}
+    "500": {"price": 29, "link": "https://www.paypal.com/ncp/payment/TU4RSPCQYUWKJ"},
+    "1000": {"price": 49, "link": "https://www.paypal.com/ncp/payment/8PGZ73P6UYPGY"},
+    "3000": {"price": 99, "link": "https://www.paypal.com/ncp/payment/AQUTD44LAPXHA"},
+    "5000": {"price": 149, "link": "https://www.paypal.com/ncp/payment/L37GZY752UVLY"}
 }
 
 # Load platforms from database
@@ -102,7 +112,7 @@ def get_all_admins():
     conn.close()
     return admins
 
-# Define VALID_PLATFORMS globally after initial load (will be empty initially)
+# Define VALID_PLATFORMS globally after initial load
 VALID_PLATFORMS = load_platforms()
 
 # Help command with inline buttons
@@ -149,11 +159,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error("No message or callback query found in update")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM submissions WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM submissions WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        logger.error(f"Error deleting submission in start: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Database error. Please try again.", parse_mode=ParseMode.MARKDOWN)
+        return
     
     global VALID_PLATFORMS
     VALID_PLATFORMS = load_platforms()
@@ -485,11 +500,23 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("admin_") and is_admin(user_id):
         if data == "admin_add":
-            await query.message.reply_text("➕ *Add a new price:* Send `/add_price <SocPeak> <USD>`", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(
+                "➕ *Add a new package:* Send `/add_price <package> <price> <link>`\n"
+                "e.g., `/add_price 500 29 https://paypal.com/xyz`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         elif data == "admin_edit":
-            await query.message.reply_text("✏️ *Edit a price:* Send `/edit_price <existing SocPeak> <new USD>`", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(
+                "✏️ *Edit a package:* Send `/edit_price <old_package> <new_package> <new_price> <new_link>`\n"
+                "e.g., `/edit_price 500 600 35 https://paypal.com/new`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         elif data == "admin_delete":
-            await query.message.reply_text("🗑️ *Delete a price:* Send `/delete_price <SocPeak>`", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(
+                "🗑️ *Delete a package:* Send `/delete_price <package>`\n"
+                "e.g., `/delete_price 500`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         elif data == "admin_qr":
             await query.message.reply_text("🔗 *Update QR link:* Send `/update_qr <new QR link>`", parse_mode=ParseMode.MARKDOWN)
         elif data == "admin_view":
@@ -526,11 +553,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if payment_screenshot_path and os.path.exists(payment_screenshot_path):
                         async with aiofiles.open(payment_screenshot_path, 'rb') as payment_photo:
                             await query.message.reply_photo(photo=await payment_photo.read())
-        elif data == "admin_change_payment_link":
-            await query.message.reply_text(
-                "🔗 *Change Payment Link:* Send `/change_payment_link <SocPeak> <new_link>`",
-                parse_mode=ParseMode.MARKDOWN
-            )
         elif data == "admin_add_platform":
             await query.message.reply_text(
                 "➕ *Add a new platform:* Send `/add_platform <platform_name>` (e.g., 'Facebook Followers')",
@@ -566,12 +588,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [InlineKeyboardButton("➕ Add Price", callback_data="admin_add"),
-         InlineKeyboardButton("✏️ Edit Price", callback_data="admin_edit")],
-        [InlineKeyboardButton("🗑️ Delete Price", callback_data="admin_delete"),
+        [InlineKeyboardButton("➕ Add Package", callback_data="admin_add"),
+         InlineKeyboardButton("✏️ Edit Package", callback_data="admin_edit")],
+        [InlineKeyboardButton("🗑️ Delete Package", callback_data="admin_delete"),
          InlineKeyboardButton("🔗 Update QR", callback_data="admin_qr")],
-        [InlineKeyboardButton("📋 View Submissions", callback_data="admin_view"),
-         InlineKeyboardButton("🔗 Change Payment Link", callback_data="admin_change_payment_link")],
+        [InlineKeyboardButton("📋 View Submissions", callback_data="admin_view")],
         [InlineKeyboardButton("➕ Add Platform", callback_data="admin_add_platform"),
          InlineKeyboardButton("✏️ Edit Platform", callback_data="admin_edit_platform"),
          InlineKeyboardButton("🗑️ Delete Platform", callback_data="admin_delete_platform")],
@@ -585,28 +606,52 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# Admin commands (text-based, but triggered via inline buttons)
+# Admin commands (updated to handle package name, price, and link)
 async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
-    if len(args) != 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("⚠️ *Usage:* `/add_price <SocPeak> <USD>`", parse_mode=ParseMode.MARKDOWN)
+    if len(args) < 3 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/add_price <package> <price> <link>`\n"
+            "e.g., `/add_price 500 29 https://paypal.com/xyz`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
-    pricing[args[0]] = {"price": int(args[1]), "link": ""}
-    await update.message.reply_text(f"✅ *Added:* {args[0]} SocPeak = {args[1]} USD", parse_mode=ParseMode.MARKDOWN)
+    package, price, link = args[0], int(args[1]), " ".join(args[2:])
+    if package in pricing:
+        await update.message.reply_text(f"⚠️ *Package {package} already exists!* Use `/edit_price` to modify it.", parse_mode=ParseMode.MARKDOWN)
+        return
+    pricing[package] = {"price": price, "link": link}
+    await update.message.reply_text(f"✅ *Added:* {package} SocPeak = {price} USD with link {link}", parse_mode=ParseMode.MARKDOWN)
 
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
         await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
         return
     args = context.args
-    if len(args) != 2 or args[0] not in pricing or not args[1].isdigit():
-        await update.message.reply_text("⚠️ *Usage:* `/edit_price <existing SocPeak> <new USD>`", parse_mode=ParseMode.MARKDOWN)
+    if len(args) < 4 or not args[1].isdigit() or not args[2].isdigit():
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/edit_price <old_package> <new_package> <new_price> <new_link>`\n"
+            "e.g., `/edit_price 500 600 35 https://paypal.com/new`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
-    pricing[args[0]]["price"] = int(args[1])
-    await update.message.reply_text(f"✅ *Updated:* {args[0]} SocPeak = {args[1]} USD", parse_mode=ParseMode.MARKDOWN)
+    old_package, new_package, new_price, new_link = args[0], args[1], int(args[2]), " ".join(args[3:])
+    if old_package not in pricing:
+        await update.message.reply_text(f"⚠️ *Package {old_package} not found!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    if old_package != new_package and new_package in pricing:
+        await update.message.reply_text(f"⚠️ *Package {new_package} already exists!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    # Update the pricing dictionary
+    del pricing[old_package]
+    pricing[new_package] = {"price": new_price, "link": new_link}
+    await update.message.reply_text(
+        f"✅ *Updated:* {old_package} → {new_package} SocPeak = {new_price} USD with link {new_link}",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def delete_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -614,10 +659,15 @@ async def delete_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if len(args) != 1 or args[0] not in pricing:
-        await update.message.reply_text("⚠️ *Usage:* `/delete_price <SocPeak>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/delete_price <package>`\n"
+            "e.g., `/delete_price 500`",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
-    del pricing[args[0]]
-    await update.message.reply_text(f"✅ *Deleted:* {args[0]} SocPeak package", parse_mode=ParseMode.MARKDOWN)
+    package = args[0]
+    del pricing[package]
+    await update.message.reply_text(f"✅ *Deleted:* {package} SocPeak package", parse_mode=ParseMode.MARKDOWN)
 
 async def update_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -647,19 +697,6 @@ async def toggle_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     VALID_PLATFORMS = load_platforms()
     await update.message.reply_text(f"✅ *Platform {platform} {'activated' if status else 'deactivated'}!*", parse_mode=ParseMode.MARKDOWN)
-
-async def change_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.message.from_user.id):
-        await update.message.reply_text("🚫 *Access denied!*", parse_mode=ParseMode.MARKDOWN)
-        return
-    args = context.args
-    if len(args) != 2 or args[0] not in pricing:
-        await update.message.reply_text("⚠️ *Usage:* `/change_payment_link <SocPeak> <new_link>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    package = args[0]
-    new_link = args[1]
-    pricing[package]["link"] = new_link
-    await update.message.reply_text(f"✅ *Updated payment link for {package} SocPeak:* {new_link}", parse_mode=ParseMode.MARKDOWN)
 
 async def add_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -796,7 +833,6 @@ def main():
     application.add_handler(CommandHandler("delete_price", delete_price))
     application.add_handler(CommandHandler("update_qr", update_qr))
     application.add_handler(CommandHandler("toggle_platform", toggle_platform))
-    application.add_handler(CommandHandler("change_payment_link", change_payment_link))
     application.add_handler(CommandHandler("add_platform", add_platform))
     application.add_handler(CommandHandler("edit_platform", edit_platform))
     application.add_handler(CommandHandler("delete_platform", delete_platform))
