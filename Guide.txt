@@ -1,0 +1,5 @@
+first you need to install depende ncy by this command
+pip install -r requirements.txt
+
+Then run
+python bot.py
